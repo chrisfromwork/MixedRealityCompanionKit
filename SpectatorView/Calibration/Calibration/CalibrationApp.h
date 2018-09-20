@@ -93,6 +93,25 @@ public:
     void GetDefaultSize( int& width, int& height ) const;
 
 private:
+    struct CAMERA_RESULTS
+    {
+        double rms;
+        double fovX;
+        double fovY;
+        cv::Mat distortion;
+        cv::Mat mat;
+    };
+
+    struct CALIBRATION_RESULTS
+    {
+        double stereoRMS;
+        cv::Mat translation;
+        cv::Mat rotation;
+
+        CAMERA_RESULTS dslrResults;
+        CAMERA_RESULTS holoResults;
+        std::vector<int> imageIndices;
+    };
 
     void Update(DX::StepTimer const& timer);
 
@@ -107,9 +126,18 @@ private:
     void TakeMRCPicture();
 
     // Calibration
-    void ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage);
+    void ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage, std::wstring customDirectory);
     void UpdateChessBoardVisual(std::vector<cv::Point2f>& colorCorners);
-    void PerformCalibration();
+
+    void PerformCalibration(CALIBRATION_RESULTS& results, std::wstring fileName);
+    void PerformCalibrationHoloMatHoloDistortion(CALIBRATION_RESULTS& results, std::wstring fileName);
+    void PerformCalibrationHoloMatNoDistortion(CALIBRATION_RESULTS& results, std::wstring fileName);
+    void PerformCalibrationHoloMatOpenCV(CALIBRATION_RESULTS& results, std::wstring fileName);
+    void PerformCalibrationHoloMatOpenCVFixPrincipal(CALIBRATION_RESULTS& results, std::wstring fileName);
+    void PerformCalibrationHoloMatOpenCVZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);
+    void PerformCalibrationHoloMatOpenCVFixPrincipalZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);
+
+    void PerformCalibrationUsingTestData(int numImages, int numIterations, std::wstring directoryName);
     void TakeCalibrationPicture();
     void TakeCalibrationPictureAtInterval(DX::StepTimer const& timer);
     void DeleteOutputFiles();
@@ -172,9 +200,12 @@ private:
     CRITICAL_SECTION commandCriticalSection;
     CRITICAL_SECTION calibrationPictureCriticalSection;
     CRITICAL_SECTION chessBoardVisualCriticalSection;
+    CRITICAL_SECTION photoVisualCriticalSection;
+    CRITICAL_SECTION imageCopyCriticalSection;
 
     // Current photo number we are on.
     int photoIndex;
+    int availableIndex;
     std::wstring outputPath;
     std::wstring cachedOutputPath;
     std::wstring calibrationFile;

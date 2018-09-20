@@ -4,6 +4,10 @@
 #include "stdafx.h"
 #include "CalibrationApp.h"
 
+#include <iostream>
+#include <fstream>
+#include <experimental/filesystem>
+
 //Get color feed from Hololens using the REST APIs:
 //https://developer.microsoft.com/en-us/windows/holographic/device_portal_api_reference
 //https://github.com/Microsoft/cpprestsdk/wiki/Getting-Started-Tutorial
@@ -11,7 +15,8 @@
 CalibrationApp::CalibrationApp() :
     colorTexture(nullptr),
     calibrationPictureElapsedTime(0),
-    photoIndex(0)
+    photoIndex(0),
+    availableIndex(0)
 {
     deviceResources = std::make_unique<DX::DeviceResources>();
     deviceResources->RegisterDeviceNotify(this);
@@ -20,6 +25,8 @@ CalibrationApp::CalibrationApp() :
     InitializeCriticalSection(&commandCriticalSection);
     InitializeCriticalSection(&calibrationPictureCriticalSection);
     InitializeCriticalSection(&chessBoardVisualCriticalSection);
+    InitializeCriticalSection(&photoVisualCriticalSection);
+    InitializeCriticalSection(&imageCopyCriticalSection);
 
     boardDimensions = cv::Size(GRID_CELLS_X - 1, GRID_CELLS_Y - 1);
     colorBytes = new BYTE[FRAME_BUFSIZE];
@@ -35,7 +42,7 @@ CalibrationApp::CalibrationApp() :
 
     calibrationFile = outputPath + L"CalibrationData.txt";
 
-    captureText = L"Images captured: %d\nUseable images: %d\nCapture timer: %5.3f\n";
+    captureText = L"Images captured: %d\nUseable images: %d\nCapture timer: %5.3f\nAvailable Images for Test: %d\n";
     commandText = L"Commands:\nENTER - Perform calibration\nSPACE - Force image capture\nX - Delete captured images\nM - Mirror display\n";
     camPhotoTitleText = L"Camera Image";
     holoPhotoTitleText = L"HoloLens Image";
@@ -224,7 +231,15 @@ void CalibrationApp::Update(DX::StepTimer const& timer)
     if (keyState.Enter && !prevKeyState.Enter)
     {
         EnterCriticalSection(&commandCriticalSection);
-        PerformCalibration();
+        CALIBRATION_RESULTS results;
+        PerformCalibration(results, L"");
+        LeaveCriticalSection(&commandCriticalSection);
+    }
+
+    if (keyState.T && !prevKeyState.T)
+    {
+        EnterCriticalSection(&commandCriticalSection);
+        PerformCalibrationUsingTestData(5, 5, L"c:\\users\\chriba\\documents\\TestCalibrationOutput\\");
         LeaveCriticalSection(&commandCriticalSection);
     }
 }
@@ -272,7 +287,7 @@ void CalibrationApp::TakeCalibrationPicture()
 
     cv::imwrite(cv::String(StringHelper::ws2s(camPath)), cachedColorMat);
 
-    ProcessChessBoards(currentIndex, cachedColorMat);
+    ProcessChessBoards(currentIndex, cachedColorMat, L"");
 }
 
 // Take calibration pictures at a predetermined interval.
@@ -303,9 +318,14 @@ void CalibrationApp::DeleteOutputFiles()
     DirectoryHelper::DeleteFiles(outputPath, L".png");
     DirectoryHelper::DeleteFiles(outputPath, L"CalibrationData.txt");
 
+    EnterCriticalSection(&chessBoardVisualCriticalSection);
     chessBoardVisualMat = cv::Mat(HOLO_HEIGHT, HOLO_WIDTH, CV_8UC4, cv::Scalar(0));
+    LeaveCriticalSection(&chessBoardVisualCriticalSection);
+
+    EnterCriticalSection(&photoVisualCriticalSection);
     camPhotoMat = cv::Mat(HOLO_HEIGHT, HOLO_WIDTH, CV_8UC4, cv::Scalar(0));
     holoPhotoMat = cv::Mat(HOLO_HEIGHT, HOLO_WIDTH, CV_8UC4, cv::Scalar(0));
+    LeaveCriticalSection(&photoVisualCriticalSection);
 
     stereoObjectPoints.clear();
     stereoColorImagePoints.clear();
@@ -329,11 +349,20 @@ bool CalibrationApp::HasChessBoard(cv::Mat image, cv::Mat& grayscaleImage, std::
 }
 
 // Assesses camera and HoloLens images for chess boards.
-void CalibrationApp::ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage)
+void CalibrationApp::ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage, std::wstring customDirectory)
 {
     bool validCameraImage = true;
     bool validHoloImage = true;
-    std::wstring pathRoot = outputPath + std::to_wstring(currentIndex).c_str() + L"_";
+    std::wstring pathRoot;
+    if (customDirectory.empty())
+    {
+        pathRoot = outputPath + std::to_wstring(currentIndex).c_str() + L"_";
+    }
+    else
+    {
+        pathRoot = customDirectory + std::to_wstring(currentIndex).c_str() + L"_";
+    }
+
     std::wstring camPath = pathRoot + L"cam.png";
     std::wstring holPath = pathRoot + L"holo.jpg";
 
@@ -410,10 +439,32 @@ void CalibrationApp::ProcessChessBoards(int currentIndex, cv::Mat& colorCameraIm
         OutputString((L"Completed parsing calibration files: " + camPath + L", " + holPath + L".\n").c_str());
     }
 
+    EnterCriticalSection(&photoVisualCriticalSection);
     memcpy(camPhotoMat.data, resizedColorImage_cam.data, resizedColorImage_cam.total() * resizedColorImage_cam.elemSize());
     camPhotoMat += validCameraImage ? greenMat : redMat;
     cv::cvtColor(colorImage_holo, holoPhotoMat, CV_BGR2BGRA);
     holoPhotoMat += validHoloImage ? greenMat : redMat;
+    LeaveCriticalSection(&photoVisualCriticalSection);
+
+    if (validCameraImage && validHoloImage)
+    {
+        wchar_t myDocumentsPath[1024];
+        SHGetFolderPathW(0, CSIDL_MYDOCUMENTS, 0, 0, myDocumentsPath);
+        std::wstring testPath = std::wstring(myDocumentsPath) + L"\\TestCalibrationFiles\\";
+        CreateDirectoryW(testPath.c_str(), NULL);
+
+        EnterCriticalSection(&imageCopyCriticalSection);
+        std::wstring camTestPath = DirectoryHelper::FindUniqueFileName(testPath, L"cam", L".png", availableIndex);
+        std::wstring holoTestPath = DirectoryHelper::FindUniqueFileName(testPath, L"holo", L".jpg", availableIndex);
+        bool camSuceeded = CopyFile(camPath.c_str(), camTestPath.c_str(), true);
+        bool holoSuceeded = CopyFile(holPath.c_str(), holoTestPath.c_str(), true);
+        if (!camSuceeded || !holoSuceeded)
+        {
+            DeleteFile(camTestPath.c_str());
+            DeleteFile(holoTestPath.c_str());
+        }
+        LeaveCriticalSection(&imageCopyCriticalSection);
+    }
 }
 
 void CalibrationApp::UpdateChessBoardVisual(std::vector<cv::Point2f>& colorCorners)
@@ -446,7 +497,7 @@ void CalibrationApp::UpdateChessBoardVisual(std::vector<cv::Point2f>& colorCorne
 }
 
 // Use the calibration pictures to stereo calibrate the camera rig.
-void CalibrationApp::PerformCalibration()
+void CalibrationApp::PerformCalibration(CALIBRATION_RESULTS& results, std::wstring fileName)
 {
     if (colorImagePoints.size() == 0 || holoImagePoints.size() == 0 || stereoColorImagePoints.size() == 0 || stereoHoloImagePoints.size() == 0)
     {
@@ -540,12 +591,33 @@ void CalibrationApp::PerformCalibration()
     );
     OutputString(L"Done stereo calibrating.\n");
 
+    results.dslrResults.rms = colorRMS;
+    results.dslrResults.mat = colorMat.clone();
+    results.dslrResults.distortion = distCoeffColor.clone();
+    results.dslrResults.fovX = colorFovX;
+    results.dslrResults.fovY = colorFovY;
+
+    results.holoResults.rms = holoRMS;
+    results.holoResults.mat = holoMat.clone();
+    results.holoResults.distortion = distCoeffHolo.clone();
+    results.holoResults.fovX = holoFovX;
+    results.holoResults.fovY = holoFovY;
+
+    results.stereoRMS = rms;
+    results.translation = T.clone();
+    results.rotation = R.clone();
+
     // Write calibration data file:
     // First Delete the old calibration file if one exists.
-    DeleteFile(calibrationFile.c_str());
+    if (fileName.empty())
+    {
+        fileName = calibrationFile;
+    }
+
+    DeleteFile(fileName.c_str());
 
     std::ofstream calibrationfs;
-    calibrationfs.open(calibrationFile.c_str());
+    calibrationfs.open(fileName.c_str());
 
     calibrationfs << "# Stereo RMS calibration error (Lower numbers are better)" << std::endl;
     calibrationfs << "RMS: " << rms << std::endl;
@@ -589,6 +661,248 @@ void CalibrationApp::PerformCalibration()
     calibrationfs << "# Number of images captured: " << photoIndex << std::endl;
     calibrationfs << "# Number of images used in calibration: " << stereoObjectPoints.size() << std::endl;
     calibrationfs.close();
+}
+
+void CalibrationApp::PerformCalibrationHoloMatHoloDistortion(CALIBRATION_RESULTS& results, std::wstring fileName)
+{
+    if (colorImagePoints.size() == 0 || holoImagePoints.size() == 0 || stereoColorImagePoints.size() == 0 || stereoHoloImagePoints.size() == 0)
+    {
+        OutputString(L"ERROR: Please take some valid chess board images before calibration.\n");
+    }
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#Mat initCameraMatrix2D(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints, Size imageSize, double aspectRatio)
+    // Add object-space points for all camera images.
+    std::vector<std::vector<cv::Point3f>> colorObjectPoints;
+    colorObjectPoints.resize(colorImagePoints.size());
+    for (int colorImagePoint = 0; colorImagePoint< colorImagePoints.size(); colorImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                colorObjectPoints[colorImagePoint].push_back(
+                    cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    // Add object-space points for all Hololens images.
+    std::vector<std::vector<cv::Point3f>> holoObjectPoints;
+    holoObjectPoints.resize(holoImagePoints.size());
+    for (int holoImagePoint = 0; holoImagePoint< holoImagePoints.size(); holoImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                holoObjectPoints[holoImagePoint].push_back(cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    double apertureWidth = 0;
+    double apertureHeight = 0;
+    double holoFovX, holoFovY, colorFovX, colorFovY = 0;
+    double focalLength = 0;
+    cv::Point2d principalPoint;
+    double aspectRatio = 0;
+
+    // Calibrate the individual cameras.
+    cv::Mat distCoeffColor, distCoeffHolo;
+    cv::Mat colorR, holoR, colorT, holoT;
+
+#if DSLR_USE_KNOWN_INTRINSICS
+    double colorFocalLength = DSLR_FOCAL_LENGTH * std::min(HOLO_WIDTH / DSLR_MATRIX_WIDTH, HOLO_HEIGHT / DSLR_MATRIX_HEIGHT);
+    cv::Mat colorMat = (cv::Mat_<double>(3, 3) << colorFocalLength, 0, HOLO_WIDTH / 2., 0, colorFocalLength, HOLO_HEIGHT / 2., 0, 0, 1);
+#else
+    cv::Mat colorMat = cv::initCameraMatrix2D(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), (double)HOLO_HEIGHT / (double)HOLO_WIDTH);
+#endif
+    cv::Mat holoMat = colorMat.clone();
+	holoMat.at<double>(0, 0);
+
+    OutputString(L"Start Calibrating DSLR.\n");
+    int colorFlags = CV_CALIB_USE_INTRINSIC_GUESS;
+#if DSLR_USE_KNOWN_INTRINSICS
+    OutputString(L"Setting user-defined focal length before calibration: ");
+    OutputString(std::to_wstring(colorFocalLength).c_str());
+    OutputString(L"\n");
+#if DSLR_FIX_FOCAL_LENGTH
+    colorFlags |= CV_CALIB_FIX_FOCAL_LENGTH;
+#endif
+#if DSLR_FIX_PRINCIPAL_POINT
+    colorFlags |= CV_CALIB_FIX_PRINCIPAL_POINT;
+#endif
+#endif
+    double colorRMS = cv::calibrateCamera(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), colorMat, distCoeffColor, colorR, colorT, colorFlags);
+    OutputString(L"Done Calibrating DSLR.\n");
+    OutputString(L"Start Calibrating HoloLens.\n");
+    double holoRMS = 0;
+    OutputString(L"Done Calibrating HoloLens.\n");
+
+    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
+    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+
+
+    // Output rotation, translation, essential matrix, fundamental matrix.
+    cv::Mat R, T, E, F;
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#double stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints1, InputArrayOfArrays imagePoints2, InputOutputArray cameraMatrix1, InputOutputArray distCoeffs1, InputOutputArray cameraMatrix2, InputOutputArray distCoeffs2, Size imageSize, OutputArray R, OutputArray T, OutputArray E, OutputArray F, TermCriteria criteria, int flags)
+    // Stereo calibrate the two cameras.
+    OutputString(L"Start stereo calibrating.\n");
+    double rms = cv::stereoCalibrate(stereoObjectPoints, stereoHoloImagePoints, stereoColorImagePoints,
+        holoMat, distCoeffHolo,
+        colorMat, distCoeffColor,
+        cv::Size(HOLO_WIDTH, HOLO_HEIGHT),
+        R, T, E, F,
+        CV_CALIB_FIX_INTRINSIC
+    );
+    OutputString(L"Done stereo calibrating.\n");
+
+    results.dslrResults.rms = colorRMS;
+    results.dslrResults.mat = colorMat.clone();
+    results.dslrResults.distortion = distCoeffColor.clone();
+    results.dslrResults.fovX = colorFovX;
+    results.dslrResults.fovY = colorFovY;
+
+    results.holoResults.rms = holoRMS;
+    results.holoResults.mat = holoMat.clone();
+    results.holoResults.distortion = distCoeffHolo.clone();
+    results.holoResults.fovX = holoFovX;
+    results.holoResults.fovY = holoFovY;
+
+    results.stereoRMS = rms;
+    results.translation = T.clone();
+    results.rotation = R.clone();
+
+    // Write calibration data file:
+    // First Delete the old calibration file if one exists.
+    if (fileName.empty())
+    {
+        fileName = calibrationFile;
+    }
+
+    DeleteFile(fileName.c_str());
+
+    std::ofstream calibrationfs;
+    calibrationfs.open(fileName.c_str());
+
+    calibrationfs << "# Stereo RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "RMS: " << rms << std::endl;
+
+    calibrationfs << "# DSLR RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "DSLR RMS: " << colorRMS << std::endl;
+
+    calibrationfs << "# HoloLens RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "HoloLens RMS: " << holoRMS << std::endl;
+
+    calibrationfs << "# Delta in meters of Hololens from Camera:" << std::endl;
+    calibrationfs << "Translation: " << T.at<double>(0, 0) << ", " << T.at<double>(1, 0) << ", " << T.at<double>(2, 0) << std::endl;
+
+    calibrationfs << "# Row Major Matrix3x3 (This should be close to identity)" << std::endl;
+    calibrationfs << "Rotation: " << R.at<double>(0, 0) << ", " << R.at<double>(0, 1) << ", " << R.at<double>(0, 2) << ", " <<
+        R.at<double>(1, 0) << ", " << R.at<double>(1, 1) << ", " << R.at<double>(1, 2) << ", " << R.at<double>(2, 0) << ", " <<
+        R.at<double>(2, 1) << ", " << R.at<double>(2, 2) << std::endl;
+
+    calibrationfs << "# Field of View of DSLR:" << std::endl;
+    calibrationfs << "DSLR_fov: " << colorFovX << ", " << colorFovY << std::endl;
+
+    calibrationfs << "# Field of View of HoloLens:" << std::endl;
+    calibrationfs << "Holo_fov: " << holoFovX << ", " << holoFovY << std::endl;
+
+    calibrationfs << "# DSLR distortion coefficients:" << std::endl;
+    calibrationfs << "DSLR_distortion: " << distCoeffColor.at<double>(0, 0) << ", " << distCoeffColor.at<double>(0, 1) << ", " <<
+        distCoeffColor.at<double>(0, 2) << ", " << distCoeffColor.at<double>(0, 3) << ", " << distCoeffColor.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# DSLR camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "DSLR_camera_Matrix: " << colorMat.at<double>(0, 0) << ", " << colorMat.at<double>(1, 1) << ", " <<
+        colorMat.at<double>(0, 2) << ", " << colorMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# HoloLens distortion coefficients:" << std::endl;
+    calibrationfs << "Holo_distortion: " << distCoeffHolo.at<double>(0, 0) << ", " << distCoeffHolo.at<double>(0, 1) << ", " <<
+        distCoeffHolo.at<double>(0, 2) << ", " << distCoeffHolo.at<double>(0, 3) << ", " << distCoeffHolo.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# HoloLens camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "Holo_camera_Matrix: " << holoMat.at<double>(0, 0) << ", " << holoMat.at<double>(1, 1) << ", " <<
+        holoMat.at<double>(0, 2) << ", " << holoMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# Number of images captured: " << photoIndex << std::endl;
+    calibrationfs << "# Number of images used in calibration: " << stereoObjectPoints.size() << std::endl;
+    calibrationfs.close();
+}
+
+void CalibrationApp::PerformCalibrationHoloMatNoDistortion(CALIBRATION_RESULTS& results, std::wstring fileName) {}
+void CalibrationApp::PerformCalibrationHoloMatOpenCV(CALIBRATION_RESULTS& results, std::wstring fileName) {}
+void CalibrationApp::PerformCalibrationHoloMatOpenCVFixPrincipal(CALIBRATION_RESULTS& results, std::wstring fileName) {}
+void CalibrationApp::PerformCalibrationHoloMatOpenCVZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName) {}
+void CalibrationApp::PerformCalibrationHoloMatOpenCVFixPrincipalZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName)
+{
+
+}
+
+void CalibrationApp::PerformCalibrationUsingTestData(int numImages, int numIterations, std::wstring directoryName)
+{
+    wchar_t myDocumentsPath[1024];
+    SHGetFolderPathW(0, CSIDL_MYDOCUMENTS, 0, 0, myDocumentsPath);
+    std::wstring testPath = std::wstring(myDocumentsPath) + L"\\TestCalibrationFiles\\";
+
+    int totalImages = 0;
+    std::wstring camTestPath = DirectoryHelper::FindUniqueFileName(testPath, L"cam", L".png", totalImages);
+
+    CreateDirectoryW(directoryName.c_str(), NULL);
+    std::vector<CALIBRATION_RESULTS> calibrationResults;
+
+    for (int n = 0; n < numIterations; n++)
+    {
+        // Clear any preexisting chess board data
+        DeleteOutputFiles();
+
+        std::vector<int> imageIndices;
+        for (int i = 0; i < numImages; i++)
+        {
+            imageIndices.push_back(rand() % totalImages);
+        }
+
+        for (auto index : imageIndices)
+        {
+            std::wstring pathRoot = testPath + std::to_wstring(index).c_str() + L"_";
+            std::wstring camPath = pathRoot + L"cam.png";
+            auto tempCameraMat = cv::imread(StringHelper::ws2s(camPath).c_str(), cv::IMREAD_UNCHANGED);
+            ProcessChessBoards(index, tempCameraMat, testPath);
+        }
+
+        std::wstring overlayFile = directoryName + std::to_wstring(n) + L"_ChessBoardsUsed.png";
+        EnterCriticalSection(&chessBoardVisualCriticalSection);
+        cv::imwrite(cv::String(StringHelper::ws2s(overlayFile)), chessBoardVisualMat);
+        LeaveCriticalSection(&chessBoardVisualCriticalSection);
+
+        std::wstring calibrationFile = directoryName + std::to_wstring(n) + L"_CalibrationData.txt";
+        CALIBRATION_RESULTS results;
+        results.imageIndices = imageIndices;
+        PerformCalibration(results, calibrationFile);
+        calibrationResults.push_back(results);
+
+        /*PerformCalibrationHoloMatHoloDistortion(CALIBRATION_RESULTS& results, std::wstring fileName);
+        PerformCalibrationHoloMatNoDistortion(CALIBRATION_RESULTS& results, std::wstring fileName);
+        PerformCalibrationHoloMatOpenCV(CALIBRATION_RESULTS& results, std::wstring fileName);
+        PerformCalibrationHoloMatOpenCVFixPrincipal(CALIBRATION_RESULTS& results, std::wstring fileName);
+        PerformCalibrationHoloMatOpenCVZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);
+        PerformCalibrationHoloMatOpenCVFixPrincipalZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);*/
+    }
+
+    std::wstring fileName = directoryName + L"Results.txt";
+    DeleteFile(fileName.c_str());
+    std::ofstream resultfs;
+    resultfs.open(fileName.c_str());
+    for (auto result : calibrationResults)
+    {
+        resultfs << "STEREO RMS: " << result.stereoRMS << std::endl;
+        for (auto index : result.imageIndices)
+        {
+            resultfs << index << " ";
+        }
+        resultfs << std::endl;
+    }
+    resultfs.close();
 }
 
 void CalibrationApp::Blit(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* dest, ID3D11PixelShader* shader)
@@ -682,7 +996,12 @@ void CalibrationApp::Render()
         LeaveCriticalSection(&photoTextureCriticalSection);
 
         // Draw observed chess boards visual.
-        DirectXHelper::UpdateSRV(deviceResources->GetD3DDevice(), chessBoardSrv, chessBoardVisualMat.data, HOLO_WIDTH * 4);
+        if (TryEnterCriticalSection(&chessBoardVisualCriticalSection))
+        {
+            DirectXHelper::UpdateSRV(deviceResources->GetD3DDevice(), chessBoardSrv, chessBoardVisualMat.data, HOLO_WIDTH * 4);
+            LeaveCriticalSection(&chessBoardVisualCriticalSection);
+        }
+
         overlaySpriteBatch->Begin(SpriteSortMode_Immediate);
         overlaySpriteBatch->Draw(chessBoardSrv, screenRect, &holoDimRect,
             Colors::White, 0.0f, XMFLOAT2(0, 0),
@@ -690,8 +1009,13 @@ void CalibrationApp::Render()
         overlaySpriteBatch->End();
 
         // Draw camera and holo images.
-        DirectXHelper::UpdateSRV(deviceResources->GetD3DDevice(), camPhotoSrv, camPhotoMat.data, HOLO_WIDTH * 4);
-        DirectXHelper::UpdateSRV(deviceResources->GetD3DDevice(), holoPhotoSrv, holoPhotoMat.data, HOLO_WIDTH * 4);
+        if (TryEnterCriticalSection(&photoVisualCriticalSection))
+        {
+            DirectXHelper::UpdateSRV(deviceResources->GetD3DDevice(), camPhotoSrv, camPhotoMat.data, HOLO_WIDTH * 4);
+            DirectXHelper::UpdateSRV(deviceResources->GetD3DDevice(), holoPhotoSrv, holoPhotoMat.data, HOLO_WIDTH * 4);
+            LeaveCriticalSection(&photoVisualCriticalSection);
+        }
+
         spriteBatch->Begin(SpriteSortMode_Immediate,
             nullptr, nullptr, nullptr, nullptr,
             [=]() {
@@ -711,7 +1035,8 @@ void CalibrationApp::Render()
         swprintf(tempBuffer, 256, captureText.c_str(),
             photoIndex,
             stereoObjectPoints.size(),
-            (CALIBRATION_FREQUENCY_SECONDS - calibrationPictureElapsedTime));
+            (CALIBRATION_FREQUENCY_SECONDS - calibrationPictureElapsedTime),
+            availableIndex);
         spriteFont->DrawString(textSpriteBatch.get(), tempBuffer, XMFLOAT2(1.f, 1.f), Colors::Black);
         spriteFont->DrawString(textSpriteBatch.get(), tempBuffer, XMFLOAT2(0, 0), Colors::White);
 
