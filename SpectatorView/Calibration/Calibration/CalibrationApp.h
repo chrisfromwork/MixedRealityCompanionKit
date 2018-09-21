@@ -126,7 +126,7 @@ private:
     void TakeMRCPicture();
 
     // Calibration
-    void ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage, std::wstring customDirectory);
+    void ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage, std::wstring customDirectory, bool copy);
     void UpdateChessBoardVisual(std::vector<cv::Point2f>& colorCorners);
 
     void PerformCalibration(CALIBRATION_RESULTS& results, std::wstring fileName);
@@ -136,6 +136,10 @@ private:
     void PerformCalibrationHoloMatOpenCVFixPrincipal(CALIBRATION_RESULTS& results, std::wstring fileName);
     void PerformCalibrationHoloMatOpenCVZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);
     void PerformCalibrationHoloMatOpenCVFixPrincipalZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);
+
+    void InterpretResults(const std::vector<CALIBRATION_RESULTS>& results, std::wstring& content);
+    void PrintMat(const cv::Mat& mat, std::wstring& content);
+    void SqrtMat(cv::Mat& mat);
 
     void PerformCalibrationUsingTestData(int numImages, int numIterations, std::wstring directoryName);
     void TakeCalibrationPicture();

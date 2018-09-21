@@ -7,6 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <experimental/filesystem>
+#include <numeric>
 
 //Get color feed from Hololens using the REST APIs:
 //https://developer.microsoft.com/en-us/windows/holographic/device_portal_api_reference
@@ -239,7 +240,12 @@ void CalibrationApp::Update(DX::StepTimer const& timer)
     if (keyState.T && !prevKeyState.T)
     {
         EnterCriticalSection(&commandCriticalSection);
-        PerformCalibrationUsingTestData(5, 5, L"c:\\users\\chriba\\documents\\TestCalibrationOutput\\");
+        PerformCalibrationUsingTestData(5, 25, L"c:\\users\\chriba\\documents\\TestCalibrationOutput_5\\");
+        PerformCalibrationUsingTestData(10, 25, L"c:\\users\\chriba\\documents\\TestCalibrationOutput_10\\");
+        PerformCalibrationUsingTestData(20, 25, L"c:\\users\\chriba\\documents\\TestCalibrationOutput_20\\");
+        PerformCalibrationUsingTestData(30, 25, L"c:\\users\\chriba\\documents\\TestCalibrationOutput_30\\");
+        PerformCalibrationUsingTestData(50, 25, L"c:\\users\\chriba\\documents\\TestCalibrationOutput_50\\");
+
         LeaveCriticalSection(&commandCriticalSection);
     }
 }
@@ -287,7 +293,7 @@ void CalibrationApp::TakeCalibrationPicture()
 
     cv::imwrite(cv::String(StringHelper::ws2s(camPath)), cachedColorMat);
 
-    ProcessChessBoards(currentIndex, cachedColorMat, L"");
+    ProcessChessBoards(currentIndex, cachedColorMat, L"", true);
 }
 
 // Take calibration pictures at a predetermined interval.
@@ -349,7 +355,7 @@ bool CalibrationApp::HasChessBoard(cv::Mat image, cv::Mat& grayscaleImage, std::
 }
 
 // Assesses camera and HoloLens images for chess boards.
-void CalibrationApp::ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage, std::wstring customDirectory)
+void CalibrationApp::ProcessChessBoards(int currentIndex, cv::Mat& colorCameraImage, std::wstring customDirectory, bool copy)
 {
     bool validCameraImage = true;
     bool validHoloImage = true;
@@ -446,7 +452,7 @@ void CalibrationApp::ProcessChessBoards(int currentIndex, cv::Mat& colorCameraIm
     holoPhotoMat += validHoloImage ? greenMat : redMat;
     LeaveCriticalSection(&photoVisualCriticalSection);
 
-    if (validCameraImage && validHoloImage)
+    if (copy && validCameraImage && validHoloImage)
     {
         wchar_t myDocumentsPath[1024];
         SHGetFolderPathW(0, CSIDL_MYDOCUMENTS, 0, 0, myDocumentsPath);
@@ -717,8 +723,6 @@ void CalibrationApp::PerformCalibrationHoloMatHoloDistortion(CALIBRATION_RESULTS
 #else
     cv::Mat colorMat = cv::initCameraMatrix2D(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), (double)HOLO_HEIGHT / (double)HOLO_WIDTH);
 #endif
-    cv::Mat holoMat = colorMat.clone();
-	holoMat.at<double>(0, 0);
 
     OutputString(L"Start Calibrating DSLR.\n");
     int colorFlags = CV_CALIB_USE_INTRINSIC_GUESS;
@@ -734,14 +738,27 @@ void CalibrationApp::PerformCalibrationHoloMatHoloDistortion(CALIBRATION_RESULTS
 #endif
 #endif
     double colorRMS = cv::calibrateCamera(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), colorMat, distCoeffColor, colorR, colorT, colorFlags);
+    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+
     OutputString(L"Done Calibrating DSLR.\n");
     OutputString(L"Start Calibrating HoloLens.\n");
     double holoRMS = 0;
     OutputString(L"Done Calibrating HoloLens.\n");
 
-    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
-    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+    cv::Mat holoMat = colorMat.clone();
+    holoMat.at<double>(0, 0) = 1556.154419f; // fx
+    holoMat.at<double>(1, 1) = 1553.992188f; // fy
+    holoMat.at<double>(0, 2) = 659.685852; // cx
+    holoMat.at<double>(1, 2) = 374.519684; // cy
 
+    distCoeffHolo = distCoeffColor.clone();
+    distCoeffHolo.at<double>(0, 0) = 0.192551; // k1
+    distCoeffHolo.at<double>(0, 1) = -0.233648; // k2
+    distCoeffHolo.at<double>(0, 2) = 0; // r1
+    distCoeffHolo.at<double>(0, 3) = 0; // r2
+    distCoeffHolo.at<double>(0, 4) = -0.150327; // k3
+
+    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
 
     // Output rotation, translation, essential matrix, fundamental matrix.
     cv::Mat R, T, E, F;
@@ -830,13 +847,1140 @@ void CalibrationApp::PerformCalibrationHoloMatHoloDistortion(CALIBRATION_RESULTS
     calibrationfs.close();
 }
 
-void CalibrationApp::PerformCalibrationHoloMatNoDistortion(CALIBRATION_RESULTS& results, std::wstring fileName) {}
-void CalibrationApp::PerformCalibrationHoloMatOpenCV(CALIBRATION_RESULTS& results, std::wstring fileName) {}
-void CalibrationApp::PerformCalibrationHoloMatOpenCVFixPrincipal(CALIBRATION_RESULTS& results, std::wstring fileName) {}
-void CalibrationApp::PerformCalibrationHoloMatOpenCVZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName) {}
+void CalibrationApp::PerformCalibrationHoloMatNoDistortion(CALIBRATION_RESULTS& results, std::wstring fileName)
+{
+    if (colorImagePoints.size() == 0 || holoImagePoints.size() == 0 || stereoColorImagePoints.size() == 0 || stereoHoloImagePoints.size() == 0)
+    {
+        OutputString(L"ERROR: Please take some valid chess board images before calibration.\n");
+    }
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#Mat initCameraMatrix2D(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints, Size imageSize, double aspectRatio)
+    // Add object-space points for all camera images.
+    std::vector<std::vector<cv::Point3f>> colorObjectPoints;
+    colorObjectPoints.resize(colorImagePoints.size());
+    for (int colorImagePoint = 0; colorImagePoint< colorImagePoints.size(); colorImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                colorObjectPoints[colorImagePoint].push_back(
+                    cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    // Add object-space points for all Hololens images.
+    std::vector<std::vector<cv::Point3f>> holoObjectPoints;
+    holoObjectPoints.resize(holoImagePoints.size());
+    for (int holoImagePoint = 0; holoImagePoint< holoImagePoints.size(); holoImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                holoObjectPoints[holoImagePoint].push_back(cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    double apertureWidth = 0;
+    double apertureHeight = 0;
+    double holoFovX, holoFovY, colorFovX, colorFovY = 0;
+    double focalLength = 0;
+    cv::Point2d principalPoint;
+    double aspectRatio = 0;
+
+    // Calibrate the individual cameras.
+    cv::Mat distCoeffColor, distCoeffHolo;
+    cv::Mat colorR, holoR, colorT, holoT;
+
+#if DSLR_USE_KNOWN_INTRINSICS
+    double colorFocalLength = DSLR_FOCAL_LENGTH * std::min(HOLO_WIDTH / DSLR_MATRIX_WIDTH, HOLO_HEIGHT / DSLR_MATRIX_HEIGHT);
+    cv::Mat colorMat = (cv::Mat_<double>(3, 3) << colorFocalLength, 0, HOLO_WIDTH / 2., 0, colorFocalLength, HOLO_HEIGHT / 2., 0, 0, 1);
+#else
+    cv::Mat colorMat = cv::initCameraMatrix2D(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), (double)HOLO_HEIGHT / (double)HOLO_WIDTH);
+#endif
+
+    OutputString(L"Start Calibrating DSLR.\n");
+    int colorFlags = CV_CALIB_USE_INTRINSIC_GUESS;
+#if DSLR_USE_KNOWN_INTRINSICS
+    OutputString(L"Setting user-defined focal length before calibration: ");
+    OutputString(std::to_wstring(colorFocalLength).c_str());
+    OutputString(L"\n");
+#if DSLR_FIX_FOCAL_LENGTH
+    colorFlags |= CV_CALIB_FIX_FOCAL_LENGTH;
+#endif
+#if DSLR_FIX_PRINCIPAL_POINT
+    colorFlags |= CV_CALIB_FIX_PRINCIPAL_POINT;
+#endif
+#endif
+    double colorRMS = cv::calibrateCamera(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), colorMat, distCoeffColor, colorR, colorT, colorFlags);
+    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+
+    OutputString(L"Done Calibrating DSLR.\n");
+    OutputString(L"Start Calibrating HoloLens.\n");
+    double holoRMS = 0;
+    OutputString(L"Done Calibrating HoloLens.\n");
+
+    cv::Mat holoMat = colorMat.clone();
+    holoMat.at<double>(0, 0) = 1556.154419f; // fx
+    holoMat.at<double>(1, 1) = 1553.992188f; // fy
+    holoMat.at<double>(0, 2) = 659.685852; // cx
+    holoMat.at<double>(1, 2) = 374.519684; // cy
+
+    distCoeffHolo = distCoeffColor.clone();
+    distCoeffHolo.at<double>(0, 0) = 0; // k1
+    distCoeffHolo.at<double>(0, 1) = 0; // k2
+    distCoeffHolo.at<double>(0, 2) = 0; // r1
+    distCoeffHolo.at<double>(0, 3) = 0; // r2
+    distCoeffHolo.at<double>(0, 4) = 0; // k3
+
+    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
+
+    // Output rotation, translation, essential matrix, fundamental matrix.
+    cv::Mat R, T, E, F;
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#double stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints1, InputArrayOfArrays imagePoints2, InputOutputArray cameraMatrix1, InputOutputArray distCoeffs1, InputOutputArray cameraMatrix2, InputOutputArray distCoeffs2, Size imageSize, OutputArray R, OutputArray T, OutputArray E, OutputArray F, TermCriteria criteria, int flags)
+    // Stereo calibrate the two cameras.
+    OutputString(L"Start stereo calibrating.\n");
+    double rms = cv::stereoCalibrate(stereoObjectPoints, stereoHoloImagePoints, stereoColorImagePoints,
+        holoMat, distCoeffHolo,
+        colorMat, distCoeffColor,
+        cv::Size(HOLO_WIDTH, HOLO_HEIGHT),
+        R, T, E, F,
+        CV_CALIB_FIX_INTRINSIC
+    );
+    OutputString(L"Done stereo calibrating.\n");
+
+    results.dslrResults.rms = colorRMS;
+    results.dslrResults.mat = colorMat.clone();
+    results.dslrResults.distortion = distCoeffColor.clone();
+    results.dslrResults.fovX = colorFovX;
+    results.dslrResults.fovY = colorFovY;
+
+    results.holoResults.rms = holoRMS;
+    results.holoResults.mat = holoMat.clone();
+    results.holoResults.distortion = distCoeffHolo.clone();
+    results.holoResults.fovX = holoFovX;
+    results.holoResults.fovY = holoFovY;
+
+    results.stereoRMS = rms;
+    results.translation = T.clone();
+    results.rotation = R.clone();
+
+    // Write calibration data file:
+    // First Delete the old calibration file if one exists.
+    if (fileName.empty())
+    {
+        fileName = calibrationFile;
+    }
+
+    DeleteFile(fileName.c_str());
+
+    std::ofstream calibrationfs;
+    calibrationfs.open(fileName.c_str());
+
+    calibrationfs << "# Stereo RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "RMS: " << rms << std::endl;
+
+    calibrationfs << "# DSLR RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "DSLR RMS: " << colorRMS << std::endl;
+
+    calibrationfs << "# HoloLens RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "HoloLens RMS: " << holoRMS << std::endl;
+
+    calibrationfs << "# Delta in meters of Hololens from Camera:" << std::endl;
+    calibrationfs << "Translation: " << T.at<double>(0, 0) << ", " << T.at<double>(1, 0) << ", " << T.at<double>(2, 0) << std::endl;
+
+    calibrationfs << "# Row Major Matrix3x3 (This should be close to identity)" << std::endl;
+    calibrationfs << "Rotation: " << R.at<double>(0, 0) << ", " << R.at<double>(0, 1) << ", " << R.at<double>(0, 2) << ", " <<
+        R.at<double>(1, 0) << ", " << R.at<double>(1, 1) << ", " << R.at<double>(1, 2) << ", " << R.at<double>(2, 0) << ", " <<
+        R.at<double>(2, 1) << ", " << R.at<double>(2, 2) << std::endl;
+
+    calibrationfs << "# Field of View of DSLR:" << std::endl;
+    calibrationfs << "DSLR_fov: " << colorFovX << ", " << colorFovY << std::endl;
+
+    calibrationfs << "# Field of View of HoloLens:" << std::endl;
+    calibrationfs << "Holo_fov: " << holoFovX << ", " << holoFovY << std::endl;
+
+    calibrationfs << "# DSLR distortion coefficients:" << std::endl;
+    calibrationfs << "DSLR_distortion: " << distCoeffColor.at<double>(0, 0) << ", " << distCoeffColor.at<double>(0, 1) << ", " <<
+        distCoeffColor.at<double>(0, 2) << ", " << distCoeffColor.at<double>(0, 3) << ", " << distCoeffColor.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# DSLR camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "DSLR_camera_Matrix: " << colorMat.at<double>(0, 0) << ", " << colorMat.at<double>(1, 1) << ", " <<
+        colorMat.at<double>(0, 2) << ", " << colorMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# HoloLens distortion coefficients:" << std::endl;
+    calibrationfs << "Holo_distortion: " << distCoeffHolo.at<double>(0, 0) << ", " << distCoeffHolo.at<double>(0, 1) << ", " <<
+        distCoeffHolo.at<double>(0, 2) << ", " << distCoeffHolo.at<double>(0, 3) << ", " << distCoeffHolo.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# HoloLens camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "Holo_camera_Matrix: " << holoMat.at<double>(0, 0) << ", " << holoMat.at<double>(1, 1) << ", " <<
+        holoMat.at<double>(0, 2) << ", " << holoMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# Number of images captured: " << photoIndex << std::endl;
+    calibrationfs << "# Number of images used in calibration: " << stereoObjectPoints.size() << std::endl;
+    calibrationfs.close();
+}
+
+void CalibrationApp::PerformCalibrationHoloMatOpenCV(CALIBRATION_RESULTS& results, std::wstring fileName)
+{
+    if (colorImagePoints.size() == 0 || holoImagePoints.size() == 0 || stereoColorImagePoints.size() == 0 || stereoHoloImagePoints.size() == 0)
+    {
+        OutputString(L"ERROR: Please take some valid chess board images before calibration.\n");
+    }
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#Mat initCameraMatrix2D(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints, Size imageSize, double aspectRatio)
+    // Add object-space points for all camera images.
+    std::vector<std::vector<cv::Point3f>> colorObjectPoints;
+    colorObjectPoints.resize(colorImagePoints.size());
+    for (int colorImagePoint = 0; colorImagePoint< colorImagePoints.size(); colorImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                colorObjectPoints[colorImagePoint].push_back(
+                    cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    // Add object-space points for all Hololens images.
+    std::vector<std::vector<cv::Point3f>> holoObjectPoints;
+    holoObjectPoints.resize(holoImagePoints.size());
+    for (int holoImagePoint = 0; holoImagePoint< holoImagePoints.size(); holoImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                holoObjectPoints[holoImagePoint].push_back(cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    double apertureWidth = 0;
+    double apertureHeight = 0;
+    double holoFovX, holoFovY, colorFovX, colorFovY = 0;
+    double focalLength = 0;
+    cv::Point2d principalPoint;
+    double aspectRatio = 0;
+
+    // Calibrate the individual cameras.
+    cv::Mat distCoeffColor, distCoeffHolo;
+    cv::Mat colorR, holoR, colorT, holoT;
+
+#if DSLR_USE_KNOWN_INTRINSICS
+    double colorFocalLength = DSLR_FOCAL_LENGTH * std::min(HOLO_WIDTH / DSLR_MATRIX_WIDTH, HOLO_HEIGHT / DSLR_MATRIX_HEIGHT);
+    cv::Mat colorMat = (cv::Mat_<double>(3, 3) << colorFocalLength, 0, HOLO_WIDTH / 2., 0, colorFocalLength, HOLO_HEIGHT / 2., 0, 0, 1);
+#else
+    cv::Mat colorMat = cv::initCameraMatrix2D(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), (double)HOLO_HEIGHT / (double)HOLO_WIDTH);
+#endif
+
+    OutputString(L"Start Calibrating DSLR.\n");
+    int colorFlags = CV_CALIB_USE_INTRINSIC_GUESS;
+#if DSLR_USE_KNOWN_INTRINSICS
+    OutputString(L"Setting user-defined focal length before calibration: ");
+    OutputString(std::to_wstring(colorFocalLength).c_str());
+    OutputString(L"\n");
+#if DSLR_FIX_FOCAL_LENGTH
+    colorFlags |= CV_CALIB_FIX_FOCAL_LENGTH;
+#endif
+#if DSLR_FIX_PRINCIPAL_POINT
+    colorFlags |= CV_CALIB_FIX_PRINCIPAL_POINT;
+#endif
+#endif
+    double colorRMS = cv::calibrateCamera(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), colorMat, distCoeffColor, colorR, colorT, colorFlags);
+    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+
+    OutputString(L"Done Calibrating DSLR.\n");
+    OutputString(L"Start Calibrating HoloLens.\n");
+
+    cv::Mat holoMat = colorMat.clone();
+    holoMat.at<double>(0, 0) = 1556.154419f; // fx
+    holoMat.at<double>(1, 1) = 1553.992188f; // fy
+    holoMat.at<double>(0, 2) = 659.685852; // cx
+    holoMat.at<double>(1, 2) = 374.519684; // cy
+
+    double holoRMS = cv::calibrateCamera(holoObjectPoints, holoImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), holoMat, distCoeffHolo, holoR, holoT, CV_CALIB_USE_INTRINSIC_GUESS);
+    OutputString(L"Done Calibrating HoloLens.\n");
+
+    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
+
+    // Output rotation, translation, essential matrix, fundamental matrix.
+    cv::Mat R, T, E, F;
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#double stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints1, InputArrayOfArrays imagePoints2, InputOutputArray cameraMatrix1, InputOutputArray distCoeffs1, InputOutputArray cameraMatrix2, InputOutputArray distCoeffs2, Size imageSize, OutputArray R, OutputArray T, OutputArray E, OutputArray F, TermCriteria criteria, int flags)
+    // Stereo calibrate the two cameras.
+    OutputString(L"Start stereo calibrating.\n");
+    double rms = cv::stereoCalibrate(stereoObjectPoints, stereoHoloImagePoints, stereoColorImagePoints,
+        holoMat, distCoeffHolo,
+        colorMat, distCoeffColor,
+        cv::Size(HOLO_WIDTH, HOLO_HEIGHT),
+        R, T, E, F,
+        CV_CALIB_FIX_INTRINSIC
+    );
+    OutputString(L"Done stereo calibrating.\n");
+
+    results.dslrResults.rms = colorRMS;
+    results.dslrResults.mat = colorMat.clone();
+    results.dslrResults.distortion = distCoeffColor.clone();
+    results.dslrResults.fovX = colorFovX;
+    results.dslrResults.fovY = colorFovY;
+
+    results.holoResults.rms = holoRMS;
+    results.holoResults.mat = holoMat.clone();
+    results.holoResults.distortion = distCoeffHolo.clone();
+    results.holoResults.fovX = holoFovX;
+    results.holoResults.fovY = holoFovY;
+
+    results.stereoRMS = rms;
+    results.translation = T.clone();
+    results.rotation = R.clone();
+
+    // Write calibration data file:
+    // First Delete the old calibration file if one exists.
+    if (fileName.empty())
+    {
+        fileName = calibrationFile;
+    }
+
+    DeleteFile(fileName.c_str());
+
+    std::ofstream calibrationfs;
+    calibrationfs.open(fileName.c_str());
+
+    calibrationfs << "# Stereo RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "RMS: " << rms << std::endl;
+
+    calibrationfs << "# DSLR RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "DSLR RMS: " << colorRMS << std::endl;
+
+    calibrationfs << "# HoloLens RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "HoloLens RMS: " << holoRMS << std::endl;
+
+    calibrationfs << "# Delta in meters of Hololens from Camera:" << std::endl;
+    calibrationfs << "Translation: " << T.at<double>(0, 0) << ", " << T.at<double>(1, 0) << ", " << T.at<double>(2, 0) << std::endl;
+
+    calibrationfs << "# Row Major Matrix3x3 (This should be close to identity)" << std::endl;
+    calibrationfs << "Rotation: " << R.at<double>(0, 0) << ", " << R.at<double>(0, 1) << ", " << R.at<double>(0, 2) << ", " <<
+        R.at<double>(1, 0) << ", " << R.at<double>(1, 1) << ", " << R.at<double>(1, 2) << ", " << R.at<double>(2, 0) << ", " <<
+        R.at<double>(2, 1) << ", " << R.at<double>(2, 2) << std::endl;
+
+    calibrationfs << "# Field of View of DSLR:" << std::endl;
+    calibrationfs << "DSLR_fov: " << colorFovX << ", " << colorFovY << std::endl;
+
+    calibrationfs << "# Field of View of HoloLens:" << std::endl;
+    calibrationfs << "Holo_fov: " << holoFovX << ", " << holoFovY << std::endl;
+
+    calibrationfs << "# DSLR distortion coefficients:" << std::endl;
+    calibrationfs << "DSLR_distortion: " << distCoeffColor.at<double>(0, 0) << ", " << distCoeffColor.at<double>(0, 1) << ", " <<
+        distCoeffColor.at<double>(0, 2) << ", " << distCoeffColor.at<double>(0, 3) << ", " << distCoeffColor.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# DSLR camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "DSLR_camera_Matrix: " << colorMat.at<double>(0, 0) << ", " << colorMat.at<double>(1, 1) << ", " <<
+        colorMat.at<double>(0, 2) << ", " << colorMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# HoloLens distortion coefficients:" << std::endl;
+    calibrationfs << "Holo_distortion: " << distCoeffHolo.at<double>(0, 0) << ", " << distCoeffHolo.at<double>(0, 1) << ", " <<
+        distCoeffHolo.at<double>(0, 2) << ", " << distCoeffHolo.at<double>(0, 3) << ", " << distCoeffHolo.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# HoloLens camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "Holo_camera_Matrix: " << holoMat.at<double>(0, 0) << ", " << holoMat.at<double>(1, 1) << ", " <<
+        holoMat.at<double>(0, 2) << ", " << holoMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# Number of images captured: " << photoIndex << std::endl;
+    calibrationfs << "# Number of images used in calibration: " << stereoObjectPoints.size() << std::endl;
+    calibrationfs.close();
+}
+
+void CalibrationApp::PerformCalibrationHoloMatOpenCVFixPrincipal(CALIBRATION_RESULTS& results, std::wstring fileName)
+{
+    if (colorImagePoints.size() == 0 || holoImagePoints.size() == 0 || stereoColorImagePoints.size() == 0 || stereoHoloImagePoints.size() == 0)
+    {
+        OutputString(L"ERROR: Please take some valid chess board images before calibration.\n");
+    }
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#Mat initCameraMatrix2D(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints, Size imageSize, double aspectRatio)
+    // Add object-space points for all camera images.
+    std::vector<std::vector<cv::Point3f>> colorObjectPoints;
+    colorObjectPoints.resize(colorImagePoints.size());
+    for (int colorImagePoint = 0; colorImagePoint< colorImagePoints.size(); colorImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                colorObjectPoints[colorImagePoint].push_back(
+                    cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    // Add object-space points for all Hololens images.
+    std::vector<std::vector<cv::Point3f>> holoObjectPoints;
+    holoObjectPoints.resize(holoImagePoints.size());
+    for (int holoImagePoint = 0; holoImagePoint< holoImagePoints.size(); holoImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                holoObjectPoints[holoImagePoint].push_back(cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    double apertureWidth = 0;
+    double apertureHeight = 0;
+    double holoFovX, holoFovY, colorFovX, colorFovY = 0;
+    double focalLength = 0;
+    cv::Point2d principalPoint;
+    double aspectRatio = 0;
+
+    // Calibrate the individual cameras.
+    cv::Mat distCoeffColor, distCoeffHolo;
+    cv::Mat colorR, holoR, colorT, holoT;
+
+#if DSLR_USE_KNOWN_INTRINSICS
+    double colorFocalLength = DSLR_FOCAL_LENGTH * std::min(HOLO_WIDTH / DSLR_MATRIX_WIDTH, HOLO_HEIGHT / DSLR_MATRIX_HEIGHT);
+    cv::Mat colorMat = (cv::Mat_<double>(3, 3) << colorFocalLength, 0, HOLO_WIDTH / 2., 0, colorFocalLength, HOLO_HEIGHT / 2., 0, 0, 1);
+#else
+    cv::Mat colorMat = cv::initCameraMatrix2D(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), (double)HOLO_HEIGHT / (double)HOLO_WIDTH);
+#endif
+
+    OutputString(L"Start Calibrating DSLR.\n");
+    int colorFlags = CV_CALIB_USE_INTRINSIC_GUESS;
+#if DSLR_USE_KNOWN_INTRINSICS
+    OutputString(L"Setting user-defined focal length before calibration: ");
+    OutputString(std::to_wstring(colorFocalLength).c_str());
+    OutputString(L"\n");
+#if DSLR_FIX_FOCAL_LENGTH
+    colorFlags |= CV_CALIB_FIX_FOCAL_LENGTH;
+#endif
+#if DSLR_FIX_PRINCIPAL_POINT
+    colorFlags |= CV_CALIB_FIX_PRINCIPAL_POINT;
+#endif
+#endif
+    double colorRMS = cv::calibrateCamera(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), colorMat, distCoeffColor, colorR, colorT, colorFlags);
+    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+
+    OutputString(L"Done Calibrating DSLR.\n");
+    OutputString(L"Start Calibrating HoloLens.\n");
+
+    cv::Mat holoMat = colorMat.clone();
+    holoMat.at<double>(0, 0) = 1556.154419f; // fx
+    holoMat.at<double>(1, 1) = 1553.992188f; // fy
+    holoMat.at<double>(0, 2) = 659.685852; // cx
+    holoMat.at<double>(1, 2) = 374.519684; // cy
+
+    double holoRMS = cv::calibrateCamera(holoObjectPoints, holoImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), holoMat, distCoeffHolo, holoR, holoT, CV_CALIB_USE_INTRINSIC_GUESS | CV_CALIB_FIX_PRINCIPAL_POINT);
+    OutputString(L"Done Calibrating HoloLens.\n");
+
+    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
+
+    // Output rotation, translation, essential matrix, fundamental matrix.
+    cv::Mat R, T, E, F;
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#double stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints1, InputArrayOfArrays imagePoints2, InputOutputArray cameraMatrix1, InputOutputArray distCoeffs1, InputOutputArray cameraMatrix2, InputOutputArray distCoeffs2, Size imageSize, OutputArray R, OutputArray T, OutputArray E, OutputArray F, TermCriteria criteria, int flags)
+    // Stereo calibrate the two cameras.
+    OutputString(L"Start stereo calibrating.\n");
+    double rms = cv::stereoCalibrate(stereoObjectPoints, stereoHoloImagePoints, stereoColorImagePoints,
+        holoMat, distCoeffHolo,
+        colorMat, distCoeffColor,
+        cv::Size(HOLO_WIDTH, HOLO_HEIGHT),
+        R, T, E, F,
+        CV_CALIB_FIX_INTRINSIC
+    );
+    OutputString(L"Done stereo calibrating.\n");
+
+    results.dslrResults.rms = colorRMS;
+    results.dslrResults.mat = colorMat.clone();
+    results.dslrResults.distortion = distCoeffColor.clone();
+    results.dslrResults.fovX = colorFovX;
+    results.dslrResults.fovY = colorFovY;
+
+    results.holoResults.rms = holoRMS;
+    results.holoResults.mat = holoMat.clone();
+    results.holoResults.distortion = distCoeffHolo.clone();
+    results.holoResults.fovX = holoFovX;
+    results.holoResults.fovY = holoFovY;
+
+    results.stereoRMS = rms;
+    results.translation = T.clone();
+    results.rotation = R.clone();
+
+    // Write calibration data file:
+    // First Delete the old calibration file if one exists.
+    if (fileName.empty())
+    {
+        fileName = calibrationFile;
+    }
+
+    DeleteFile(fileName.c_str());
+
+    std::ofstream calibrationfs;
+    calibrationfs.open(fileName.c_str());
+
+    calibrationfs << "# Stereo RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "RMS: " << rms << std::endl;
+
+    calibrationfs << "# DSLR RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "DSLR RMS: " << colorRMS << std::endl;
+
+    calibrationfs << "# HoloLens RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "HoloLens RMS: " << holoRMS << std::endl;
+
+    calibrationfs << "# Delta in meters of Hololens from Camera:" << std::endl;
+    calibrationfs << "Translation: " << T.at<double>(0, 0) << ", " << T.at<double>(1, 0) << ", " << T.at<double>(2, 0) << std::endl;
+
+    calibrationfs << "# Row Major Matrix3x3 (This should be close to identity)" << std::endl;
+    calibrationfs << "Rotation: " << R.at<double>(0, 0) << ", " << R.at<double>(0, 1) << ", " << R.at<double>(0, 2) << ", " <<
+        R.at<double>(1, 0) << ", " << R.at<double>(1, 1) << ", " << R.at<double>(1, 2) << ", " << R.at<double>(2, 0) << ", " <<
+        R.at<double>(2, 1) << ", " << R.at<double>(2, 2) << std::endl;
+
+    calibrationfs << "# Field of View of DSLR:" << std::endl;
+    calibrationfs << "DSLR_fov: " << colorFovX << ", " << colorFovY << std::endl;
+
+    calibrationfs << "# Field of View of HoloLens:" << std::endl;
+    calibrationfs << "Holo_fov: " << holoFovX << ", " << holoFovY << std::endl;
+
+    calibrationfs << "# DSLR distortion coefficients:" << std::endl;
+    calibrationfs << "DSLR_distortion: " << distCoeffColor.at<double>(0, 0) << ", " << distCoeffColor.at<double>(0, 1) << ", " <<
+        distCoeffColor.at<double>(0, 2) << ", " << distCoeffColor.at<double>(0, 3) << ", " << distCoeffColor.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# DSLR camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "DSLR_camera_Matrix: " << colorMat.at<double>(0, 0) << ", " << colorMat.at<double>(1, 1) << ", " <<
+        colorMat.at<double>(0, 2) << ", " << colorMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# HoloLens distortion coefficients:" << std::endl;
+    calibrationfs << "Holo_distortion: " << distCoeffHolo.at<double>(0, 0) << ", " << distCoeffHolo.at<double>(0, 1) << ", " <<
+        distCoeffHolo.at<double>(0, 2) << ", " << distCoeffHolo.at<double>(0, 3) << ", " << distCoeffHolo.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# HoloLens camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "Holo_camera_Matrix: " << holoMat.at<double>(0, 0) << ", " << holoMat.at<double>(1, 1) << ", " <<
+        holoMat.at<double>(0, 2) << ", " << holoMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# Number of images captured: " << photoIndex << std::endl;
+    calibrationfs << "# Number of images used in calibration: " << stereoObjectPoints.size() << std::endl;
+    calibrationfs.close();
+}
+
+void CalibrationApp::PerformCalibrationHoloMatOpenCVZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName)
+{
+    if (colorImagePoints.size() == 0 || holoImagePoints.size() == 0 || stereoColorImagePoints.size() == 0 || stereoHoloImagePoints.size() == 0)
+    {
+        OutputString(L"ERROR: Please take some valid chess board images before calibration.\n");
+    }
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#Mat initCameraMatrix2D(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints, Size imageSize, double aspectRatio)
+    // Add object-space points for all camera images.
+    std::vector<std::vector<cv::Point3f>> colorObjectPoints;
+    colorObjectPoints.resize(colorImagePoints.size());
+    for (int colorImagePoint = 0; colorImagePoint< colorImagePoints.size(); colorImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                colorObjectPoints[colorImagePoint].push_back(
+                    cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    // Add object-space points for all Hololens images.
+    std::vector<std::vector<cv::Point3f>> holoObjectPoints;
+    holoObjectPoints.resize(holoImagePoints.size());
+    for (int holoImagePoint = 0; holoImagePoint< holoImagePoints.size(); holoImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                holoObjectPoints[holoImagePoint].push_back(cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    double apertureWidth = 0;
+    double apertureHeight = 0;
+    double holoFovX, holoFovY, colorFovX, colorFovY = 0;
+    double focalLength = 0;
+    cv::Point2d principalPoint;
+    double aspectRatio = 0;
+
+    // Calibrate the individual cameras.
+    cv::Mat distCoeffColor, distCoeffHolo;
+    cv::Mat colorR, holoR, colorT, holoT;
+
+#if DSLR_USE_KNOWN_INTRINSICS
+    double colorFocalLength = DSLR_FOCAL_LENGTH * std::min(HOLO_WIDTH / DSLR_MATRIX_WIDTH, HOLO_HEIGHT / DSLR_MATRIX_HEIGHT);
+    cv::Mat colorMat = (cv::Mat_<double>(3, 3) << colorFocalLength, 0, HOLO_WIDTH / 2., 0, colorFocalLength, HOLO_HEIGHT / 2., 0, 0, 1);
+#else
+    cv::Mat colorMat = cv::initCameraMatrix2D(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), (double)HOLO_HEIGHT / (double)HOLO_WIDTH);
+#endif
+
+    OutputString(L"Start Calibrating DSLR.\n");
+    int colorFlags = CV_CALIB_USE_INTRINSIC_GUESS;
+#if DSLR_USE_KNOWN_INTRINSICS
+    OutputString(L"Setting user-defined focal length before calibration: ");
+    OutputString(std::to_wstring(colorFocalLength).c_str());
+    OutputString(L"\n");
+#if DSLR_FIX_FOCAL_LENGTH
+    colorFlags |= CV_CALIB_FIX_FOCAL_LENGTH;
+#endif
+#if DSLR_FIX_PRINCIPAL_POINT
+    colorFlags |= CV_CALIB_FIX_PRINCIPAL_POINT;
+#endif
+#endif
+    double colorRMS = cv::calibrateCamera(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), colorMat, distCoeffColor, colorR, colorT, colorFlags);
+    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+
+    OutputString(L"Done Calibrating DSLR.\n");
+    OutputString(L"Start Calibrating HoloLens.\n");
+
+    cv::Mat holoMat = colorMat.clone();
+    holoMat.at<double>(0, 0) = 1556.154419f; // fx
+    holoMat.at<double>(1, 1) = 1553.992188f; // fy
+    holoMat.at<double>(0, 2) = 659.685852; // cx
+    holoMat.at<double>(1, 2) = 374.519684; // cy
+
+    double holoRMS = cv::calibrateCamera(holoObjectPoints, holoImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), holoMat, distCoeffHolo, holoR, holoT, CV_CALIB_USE_INTRINSIC_GUESS | CV_CALIB_ZERO_TANGENT_DIST);
+    OutputString(L"Done Calibrating HoloLens.\n");
+
+    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
+
+    // Output rotation, translation, essential matrix, fundamental matrix.
+    cv::Mat R, T, E, F;
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#double stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints1, InputArrayOfArrays imagePoints2, InputOutputArray cameraMatrix1, InputOutputArray distCoeffs1, InputOutputArray cameraMatrix2, InputOutputArray distCoeffs2, Size imageSize, OutputArray R, OutputArray T, OutputArray E, OutputArray F, TermCriteria criteria, int flags)
+    // Stereo calibrate the two cameras.
+    OutputString(L"Start stereo calibrating.\n");
+    double rms = cv::stereoCalibrate(stereoObjectPoints, stereoHoloImagePoints, stereoColorImagePoints,
+        holoMat, distCoeffHolo,
+        colorMat, distCoeffColor,
+        cv::Size(HOLO_WIDTH, HOLO_HEIGHT),
+        R, T, E, F,
+        CV_CALIB_FIX_INTRINSIC
+    );
+    OutputString(L"Done stereo calibrating.\n");
+
+    results.dslrResults.rms = colorRMS;
+    results.dslrResults.mat = colorMat.clone();
+    results.dslrResults.distortion = distCoeffColor.clone();
+    results.dslrResults.fovX = colorFovX;
+    results.dslrResults.fovY = colorFovY;
+
+    results.holoResults.rms = holoRMS;
+    results.holoResults.mat = holoMat.clone();
+    results.holoResults.distortion = distCoeffHolo.clone();
+    results.holoResults.fovX = holoFovX;
+    results.holoResults.fovY = holoFovY;
+
+    results.stereoRMS = rms;
+    results.translation = T.clone();
+    results.rotation = R.clone();
+
+    // Write calibration data file:
+    // First Delete the old calibration file if one exists.
+    if (fileName.empty())
+    {
+        fileName = calibrationFile;
+    }
+
+    DeleteFile(fileName.c_str());
+
+    std::ofstream calibrationfs;
+    calibrationfs.open(fileName.c_str());
+
+    calibrationfs << "# Stereo RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "RMS: " << rms << std::endl;
+
+    calibrationfs << "# DSLR RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "DSLR RMS: " << colorRMS << std::endl;
+
+    calibrationfs << "# HoloLens RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "HoloLens RMS: " << holoRMS << std::endl;
+
+    calibrationfs << "# Delta in meters of Hololens from Camera:" << std::endl;
+    calibrationfs << "Translation: " << T.at<double>(0, 0) << ", " << T.at<double>(1, 0) << ", " << T.at<double>(2, 0) << std::endl;
+
+    calibrationfs << "# Row Major Matrix3x3 (This should be close to identity)" << std::endl;
+    calibrationfs << "Rotation: " << R.at<double>(0, 0) << ", " << R.at<double>(0, 1) << ", " << R.at<double>(0, 2) << ", " <<
+        R.at<double>(1, 0) << ", " << R.at<double>(1, 1) << ", " << R.at<double>(1, 2) << ", " << R.at<double>(2, 0) << ", " <<
+        R.at<double>(2, 1) << ", " << R.at<double>(2, 2) << std::endl;
+
+    calibrationfs << "# Field of View of DSLR:" << std::endl;
+    calibrationfs << "DSLR_fov: " << colorFovX << ", " << colorFovY << std::endl;
+
+    calibrationfs << "# Field of View of HoloLens:" << std::endl;
+    calibrationfs << "Holo_fov: " << holoFovX << ", " << holoFovY << std::endl;
+
+    calibrationfs << "# DSLR distortion coefficients:" << std::endl;
+    calibrationfs << "DSLR_distortion: " << distCoeffColor.at<double>(0, 0) << ", " << distCoeffColor.at<double>(0, 1) << ", " <<
+        distCoeffColor.at<double>(0, 2) << ", " << distCoeffColor.at<double>(0, 3) << ", " << distCoeffColor.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# DSLR camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "DSLR_camera_Matrix: " << colorMat.at<double>(0, 0) << ", " << colorMat.at<double>(1, 1) << ", " <<
+        colorMat.at<double>(0, 2) << ", " << colorMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# HoloLens distortion coefficients:" << std::endl;
+    calibrationfs << "Holo_distortion: " << distCoeffHolo.at<double>(0, 0) << ", " << distCoeffHolo.at<double>(0, 1) << ", " <<
+        distCoeffHolo.at<double>(0, 2) << ", " << distCoeffHolo.at<double>(0, 3) << ", " << distCoeffHolo.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# HoloLens camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "Holo_camera_Matrix: " << holoMat.at<double>(0, 0) << ", " << holoMat.at<double>(1, 1) << ", " <<
+        holoMat.at<double>(0, 2) << ", " << holoMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# Number of images captured: " << photoIndex << std::endl;
+    calibrationfs << "# Number of images used in calibration: " << stereoObjectPoints.size() << std::endl;
+    calibrationfs.close();
+}
+
 void CalibrationApp::PerformCalibrationHoloMatOpenCVFixPrincipalZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName)
 {
+    if (colorImagePoints.size() == 0 || holoImagePoints.size() == 0 || stereoColorImagePoints.size() == 0 || stereoHoloImagePoints.size() == 0)
+    {
+        OutputString(L"ERROR: Please take some valid chess board images before calibration.\n");
+    }
 
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#Mat initCameraMatrix2D(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints, Size imageSize, double aspectRatio)
+    // Add object-space points for all camera images.
+    std::vector<std::vector<cv::Point3f>> colorObjectPoints;
+    colorObjectPoints.resize(colorImagePoints.size());
+    for (int colorImagePoint = 0; colorImagePoint< colorImagePoints.size(); colorImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                colorObjectPoints[colorImagePoint].push_back(
+                    cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    // Add object-space points for all Hololens images.
+    std::vector<std::vector<cv::Point3f>> holoObjectPoints;
+    holoObjectPoints.resize(holoImagePoints.size());
+    for (int holoImagePoint = 0; holoImagePoint< holoImagePoints.size(); holoImagePoint++)
+    {
+        for (int i = 0; i < boardDimensions.height; i++)
+        {
+            for (int j = 0; j < boardDimensions.width; j++)
+            {
+                holoObjectPoints[holoImagePoint].push_back(cv::Point3f((float)(j * CHESS_SQUARE_SIZE), (float)(i * CHESS_SQUARE_SIZE), 0.0f));
+            }
+        }
+    }
+
+    double apertureWidth = 0;
+    double apertureHeight = 0;
+    double holoFovX, holoFovY, colorFovX, colorFovY = 0;
+    double focalLength = 0;
+    cv::Point2d principalPoint;
+    double aspectRatio = 0;
+
+    // Calibrate the individual cameras.
+    cv::Mat distCoeffColor, distCoeffHolo;
+    cv::Mat colorR, holoR, colorT, holoT;
+
+#if DSLR_USE_KNOWN_INTRINSICS
+    double colorFocalLength = DSLR_FOCAL_LENGTH * std::min(HOLO_WIDTH / DSLR_MATRIX_WIDTH, HOLO_HEIGHT / DSLR_MATRIX_HEIGHT);
+    cv::Mat colorMat = (cv::Mat_<double>(3, 3) << colorFocalLength, 0, HOLO_WIDTH / 2., 0, colorFocalLength, HOLO_HEIGHT / 2., 0, 0, 1);
+#else
+    cv::Mat colorMat = cv::initCameraMatrix2D(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), (double)HOLO_HEIGHT / (double)HOLO_WIDTH);
+#endif
+
+    OutputString(L"Start Calibrating DSLR.\n");
+    int colorFlags = CV_CALIB_USE_INTRINSIC_GUESS;
+#if DSLR_USE_KNOWN_INTRINSICS
+    OutputString(L"Setting user-defined focal length before calibration: ");
+    OutputString(std::to_wstring(colorFocalLength).c_str());
+    OutputString(L"\n");
+#if DSLR_FIX_FOCAL_LENGTH
+    colorFlags |= CV_CALIB_FIX_FOCAL_LENGTH;
+#endif
+#if DSLR_FIX_PRINCIPAL_POINT
+    colorFlags |= CV_CALIB_FIX_PRINCIPAL_POINT;
+#endif
+#endif
+    double colorRMS = cv::calibrateCamera(colorObjectPoints, colorImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), colorMat, distCoeffColor, colorR, colorT, colorFlags);
+    cv::calibrationMatrixValues(colorMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, colorFovX, colorFovY, focalLength, principalPoint, aspectRatio);
+
+    OutputString(L"Done Calibrating DSLR.\n");
+    OutputString(L"Start Calibrating HoloLens.\n");
+
+    cv::Mat holoMat = colorMat.clone();
+    holoMat.at<double>(0, 0) = 1556.154419f; // fx
+    holoMat.at<double>(1, 1) = 1553.992188f; // fy
+    holoMat.at<double>(0, 2) = 659.685852; // cx
+    holoMat.at<double>(1, 2) = 374.519684; // cy
+
+    double holoRMS = cv::calibrateCamera(holoObjectPoints, holoImagePoints, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), holoMat, distCoeffHolo, holoR, holoT, CV_CALIB_USE_INTRINSIC_GUESS | CV_CALIB_FIX_PRINCIPAL_POINT | CV_CALIB_ZERO_TANGENT_DIST);
+    OutputString(L"Done Calibrating HoloLens.\n");
+
+    cv::calibrationMatrixValues(holoMat, cv::Size(HOLO_WIDTH, HOLO_HEIGHT), apertureWidth, apertureHeight, holoFovX, holoFovY, focalLength, principalPoint, aspectRatio);
+
+    // Output rotation, translation, essential matrix, fundamental matrix.
+    cv::Mat R, T, E, F;
+
+    //http://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html#double stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints1, InputArrayOfArrays imagePoints2, InputOutputArray cameraMatrix1, InputOutputArray distCoeffs1, InputOutputArray cameraMatrix2, InputOutputArray distCoeffs2, Size imageSize, OutputArray R, OutputArray T, OutputArray E, OutputArray F, TermCriteria criteria, int flags)
+    // Stereo calibrate the two cameras.
+    OutputString(L"Start stereo calibrating.\n");
+    double rms = cv::stereoCalibrate(stereoObjectPoints, stereoHoloImagePoints, stereoColorImagePoints,
+        holoMat, distCoeffHolo,
+        colorMat, distCoeffColor,
+        cv::Size(HOLO_WIDTH, HOLO_HEIGHT),
+        R, T, E, F,
+        CV_CALIB_FIX_INTRINSIC
+    );
+    OutputString(L"Done stereo calibrating.\n");
+
+    results.dslrResults.rms = colorRMS;
+    results.dslrResults.mat = colorMat.clone();
+    results.dslrResults.distortion = distCoeffColor.clone();
+    results.dslrResults.fovX = colorFovX;
+    results.dslrResults.fovY = colorFovY;
+
+    results.holoResults.rms = holoRMS;
+    results.holoResults.mat = holoMat.clone();
+    results.holoResults.distortion = distCoeffHolo.clone();
+    results.holoResults.fovX = holoFovX;
+    results.holoResults.fovY = holoFovY;
+
+    results.stereoRMS = rms;
+    results.translation = T.clone();
+    results.rotation = R.clone();
+
+    // Write calibration data file:
+    // First Delete the old calibration file if one exists.
+    if (fileName.empty())
+    {
+        fileName = calibrationFile;
+    }
+
+    DeleteFile(fileName.c_str());
+
+    std::ofstream calibrationfs;
+    calibrationfs.open(fileName.c_str());
+
+    calibrationfs << "# Stereo RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "RMS: " << rms << std::endl;
+
+    calibrationfs << "# DSLR RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "DSLR RMS: " << colorRMS << std::endl;
+
+    calibrationfs << "# HoloLens RMS calibration error (Lower numbers are better)" << std::endl;
+    calibrationfs << "HoloLens RMS: " << holoRMS << std::endl;
+
+    calibrationfs << "# Delta in meters of Hololens from Camera:" << std::endl;
+    calibrationfs << "Translation: " << T.at<double>(0, 0) << ", " << T.at<double>(1, 0) << ", " << T.at<double>(2, 0) << std::endl;
+
+    calibrationfs << "# Row Major Matrix3x3 (This should be close to identity)" << std::endl;
+    calibrationfs << "Rotation: " << R.at<double>(0, 0) << ", " << R.at<double>(0, 1) << ", " << R.at<double>(0, 2) << ", " <<
+        R.at<double>(1, 0) << ", " << R.at<double>(1, 1) << ", " << R.at<double>(1, 2) << ", " << R.at<double>(2, 0) << ", " <<
+        R.at<double>(2, 1) << ", " << R.at<double>(2, 2) << std::endl;
+
+    calibrationfs << "# Field of View of DSLR:" << std::endl;
+    calibrationfs << "DSLR_fov: " << colorFovX << ", " << colorFovY << std::endl;
+
+    calibrationfs << "# Field of View of HoloLens:" << std::endl;
+    calibrationfs << "Holo_fov: " << holoFovX << ", " << holoFovY << std::endl;
+
+    calibrationfs << "# DSLR distortion coefficients:" << std::endl;
+    calibrationfs << "DSLR_distortion: " << distCoeffColor.at<double>(0, 0) << ", " << distCoeffColor.at<double>(0, 1) << ", " <<
+        distCoeffColor.at<double>(0, 2) << ", " << distCoeffColor.at<double>(0, 3) << ", " << distCoeffColor.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# DSLR camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "DSLR_camera_Matrix: " << colorMat.at<double>(0, 0) << ", " << colorMat.at<double>(1, 1) << ", " <<
+        colorMat.at<double>(0, 2) << ", " << colorMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# HoloLens distortion coefficients:" << std::endl;
+    calibrationfs << "Holo_distortion: " << distCoeffHolo.at<double>(0, 0) << ", " << distCoeffHolo.at<double>(0, 1) << ", " <<
+        distCoeffHolo.at<double>(0, 2) << ", " << distCoeffHolo.at<double>(0, 3) << ", " << distCoeffHolo.at<double>(0, 4) << std::endl;
+
+    calibrationfs << "# HoloLens camera Matrix: fx, fy, cx, cy:" << std::endl;
+    calibrationfs << "Holo_camera_Matrix: " << holoMat.at<double>(0, 0) << ", " << holoMat.at<double>(1, 1) << ", " <<
+        holoMat.at<double>(0, 2) << ", " << holoMat.at<double>(1, 2) << std::endl;
+
+    calibrationfs << "# Number of images captured: " << photoIndex << std::endl;
+    calibrationfs << "# Number of images used in calibration: " << stereoObjectPoints.size() << std::endl;
+    calibrationfs.close();
+}
+
+void CalibrationApp::InterpretResults(const std::vector<CALIBRATION_RESULTS>& results, std::wstring& content)
+{
+    double count = static_cast<double>(results.size());
+
+    content += L"\n";
+    double meanRMS = std::accumulate(results.begin(), results.end(), 0.0,
+        [count](double value1, CALIBRATION_RESULTS value2)
+    {
+        return value1 + (value2.stereoRMS / count);
+    });
+    content += L"STEREO CALIBRATION MEAN RMS: " + std::to_wstring(meanRMS) + L"\n";
+
+    double stdDevRMS = sqrt(std::accumulate(results.begin(), results.end(), 0.0,
+        [meanRMS, count](double value1, CALIBRATION_RESULTS value2)
+    {
+        double diff = meanRMS - value2.stereoRMS;
+        double diffSq = diff * diff;
+        double val = diffSq / (double)count;
+        return value1 + val;
+    }));
+    stdDevRMS = sqrt(stdDevRMS);
+    content += L"STEREO CALIBRATION STDEV RMS: " + std::to_wstring(stdDevRMS) + L"\n";
+
+    cv::Mat meanTranslation = cv::Mat::zeros(results[0].translation.size(), results[0].translation.type());
+    for (auto result : results)
+    {
+        meanTranslation += (result.translation / count);
+    }
+    content += L"MEAN TRANSLATION: ";
+    PrintMat(meanTranslation, content);
+    content += L"\n";
+
+    cv::Mat stdevTranslation = cv::Mat::zeros(results[0].translation.size(), results[0].translation.type());
+    for (auto result : results)
+    {
+        auto mat = (meanTranslation - result.translation);
+        mat = mat.mul(mat) / count;
+        stdevTranslation += mat;
+    }
+    content += L"STDEV TRANSLATION: ";
+    SqrtMat(stdevTranslation);
+    PrintMat(stdevTranslation, content);
+    content += L"\n";
+
+    cv::Mat meanRotation = cv::Mat::zeros(results[0].rotation.size(), results[0].rotation.type());
+    for (auto result : results)
+    {
+        meanRotation += (result.rotation / count);
+    }
+    content += L"MEAN ROTATION: ";
+    PrintMat(meanRotation, content);
+    content += L"\n";
+
+    cv::Mat stdevRotation = cv::Mat::zeros(results[0].rotation.size(), results[0].rotation.type());
+    for (auto result : results)
+    {
+        auto mat = (meanRotation - result.rotation);
+        mat = mat.mul(mat) / count;
+        stdevRotation += mat;
+    }
+    content += L"STDEV ROTATION: ";
+    SqrtMat(stdevRotation);
+    PrintMat(stdevRotation, content);
+    content += L"\n";
+
+    content += L"\nDSLR RESULTS:\n";
+    double meanDslrRMS = std::accumulate(results.begin(), results.end(), 0.0,
+        [count](double value1, CALIBRATION_RESULTS value2)
+    {
+        return value1 + (value2.dslrResults.rms / count);
+    });
+    content += L"MEAN DSLR RMS: " + std::to_wstring(meanDslrRMS) + L"\n";
+
+    double stdevDslrRMS = std::accumulate(results.begin(), results.end(), 0.0,
+        [meanDslrRMS, count](double value1, CALIBRATION_RESULTS value2)
+    {
+        double value = meanDslrRMS - value2.dslrResults.rms;
+        return value1 + ((value * value) / count);
+    });
+    stdevDslrRMS = sqrt(stdevDslrRMS);
+    content += L"STDEV DSLR RMS: " + std::to_wstring(stdevDslrRMS) + L"\n";
+
+    cv::Mat meanDslrMat = cv::Mat::zeros(results[0].dslrResults.mat.size(), results[0].dslrResults.mat.type());
+    for (auto result : results)
+    {
+        meanDslrMat += (result.dslrResults.mat / count);
+    }
+    content += L"MEAN DSLR MAT: ";
+    PrintMat(meanDslrMat, content);
+    content += L"\n";
+
+    cv::Mat stdevDslrMat = cv::Mat::zeros(results[0].dslrResults.mat.size(), results[0].dslrResults.mat.type());
+    for (auto result : results)
+    {
+        auto mat = (meanDslrMat - result.dslrResults.mat);
+        mat = mat.mul(mat) / count;
+        stdevDslrMat += mat;
+    }
+    content += L"STDEV DSLR MAT: ";
+    SqrtMat(stdevDslrMat);
+    PrintMat(stdevDslrMat, content);
+    content += L"\n";
+
+    cv::Mat meanDslrDistortion = cv::Mat::zeros(results[0].dslrResults.distortion.size(), results[0].dslrResults.distortion.type());
+    for (auto result : results)
+    {
+        meanDslrDistortion += (result.dslrResults.distortion / count);
+    }
+    content += L"MEAN DSLR DISTORTION: ";
+    PrintMat(meanDslrDistortion, content);
+    content += L"\n";
+
+    cv::Mat stdevDslrDistortion = cv::Mat::zeros(results[0].dslrResults.distortion.size(), results[0].dslrResults.distortion.type());
+    for (auto result : results)
+    {
+        auto mat = (meanDslrDistortion - result.dslrResults.distortion);
+        mat = mat.mul(mat) / count;
+        stdevDslrDistortion += mat;
+    }
+    content += L"STDEV DSLR DISTORTION: ";
+    SqrtMat(stdevDslrDistortion);
+    PrintMat(stdevDslrDistortion, content);
+    content += L"\n";
+
+    double meanDslrFovX = std::accumulate(results.begin(), results.end(), 0.0,
+        [count](double value1, CALIBRATION_RESULTS value2)
+    {
+        return value1 + (value2.dslrResults.fovX / count);
+    });
+    content += L"MEAN DSLR FOV X: " + std::to_wstring(meanDslrFovX) + L"\n";
+
+    double stdevDslrFovX = std::accumulate(results.begin(), results.end(), 0.0,
+        [meanDslrFovX, count](double value1, CALIBRATION_RESULTS value2)
+    {
+        double value = meanDslrFovX - value2.dslrResults.fovX;
+        return value1 + ((value * value) / count);
+    });
+    stdevDslrFovX = sqrt(stdevDslrFovX);
+    content += L"STDEV DSLR FOV X: " + std::to_wstring(stdevDslrFovX) + L"\n";
+
+    double meanDslrFovY = std::accumulate(results.begin(), results.end(), 0.0,
+        [count](double value1, CALIBRATION_RESULTS value2)
+    {
+        return value1 + (value2.dslrResults.fovY / count);
+    });
+    content += L"MEAN DSLR FOV Y: " + std::to_wstring(meanDslrFovY) + L"\n";
+
+    double stdevDslrFovY = std::accumulate(results.begin(), results.end(), 0.0,
+        [meanDslrFovY, count](double value1, CALIBRATION_RESULTS value2)
+    {
+        double value = meanDslrFovY - value2.dslrResults.fovY;
+        return value1 + ((value * value) / count);
+    });
+    stdevDslrFovY = sqrt(stdevDslrFovY);
+    content += L"STDEV DSLR FOV Y: " + std::to_wstring(stdevDslrFovY) + L"\n";
+
+    content += L"\nHOLOLENS RESULTS:\n";
+    double meanHoloRMS = std::accumulate(results.begin(), results.end(), 0.0,
+        [count](double value1, CALIBRATION_RESULTS value2)
+    {
+        return value1 + (value2.holoResults.rms / count);
+    });
+    content += L"MEAN HOLO RMS: " + std::to_wstring(meanHoloRMS) + L"\n";
+
+    double stdevHoloRMS = std::accumulate(results.begin(), results.end(), 0.0,
+        [meanHoloRMS, count](double value1, CALIBRATION_RESULTS value2)
+    {
+        double value = meanHoloRMS - value2.holoResults.rms;
+        return value1 + ((value * value) / count);
+    });
+    stdevHoloRMS = sqrt(stdevHoloRMS);
+    content += L"STDEV HOLO RMS: " + std::to_wstring(stdevHoloRMS) + L"\n";
+
+    cv::Mat meanHoloMat = cv::Mat::zeros(results[0].holoResults.mat.size(), results[0].holoResults.mat.type());
+    for (auto result : results)
+    {
+        meanHoloMat += (result.holoResults.mat / count);
+    }
+    content += L"MEAN HOLO MAT: ";
+    PrintMat(meanHoloMat, content);
+    content += L"\n";
+
+    cv::Mat stdevHoloMat = cv::Mat::zeros(results[0].holoResults.mat.size(), results[0].holoResults.mat.type());
+    for (auto result : results)
+    {
+        auto mat = (meanHoloMat - result.holoResults.mat);
+        mat = mat.mul(mat) / count;
+        stdevHoloMat += mat;
+    }
+    content += L"STDEV HOLO MAT: ";
+    SqrtMat(stdevHoloMat);
+    PrintMat(stdevHoloMat, content);
+    content += L"\n";
+
+    cv::Mat meanHoloDistortion = cv::Mat::zeros(results[0].holoResults.distortion.size(), results[0].holoResults.distortion.type());
+    for (auto result : results)
+    {
+        meanHoloDistortion += result.holoResults.distortion / count;
+    }
+    content += L"MEAN HOLO DISTORTION: ";
+    PrintMat(meanHoloDistortion, content);
+    content += L"\n";
+
+    cv::Mat stdevHoloDistortion = cv::Mat::zeros(results[0].holoResults.distortion.size(), results[0].holoResults.distortion.type());
+    for (auto result : results)
+    {
+        auto mat = (meanHoloDistortion - result.holoResults.distortion);
+        mat = mat.mul(mat) / count;
+        stdevHoloDistortion += mat;
+    }
+    content += L"STDEV HOLO DISTORTION: ";
+    SqrtMat(stdevHoloDistortion);
+    PrintMat(stdevHoloDistortion, content);
+    content += L"\n";
+
+    double meanHoloFovX = std::accumulate(results.begin(), results.end(), 0.0,
+        [count](double value1, CALIBRATION_RESULTS value2)
+    {
+        return value1 + (value2.holoResults.fovX / count);
+    });
+    content += L"MEAN HOLO FOV X: " + std::to_wstring(meanHoloFovX) + L"\n";
+
+    double stdevHoloFovX = std::accumulate(results.begin(), results.end(), 0.0,
+        [meanHoloFovX, count](double value1, CALIBRATION_RESULTS value2)
+    {
+        double value = meanHoloFovX - value2.holoResults.fovX;
+        return value1 + ((value * value) / count);
+    });
+    stdevHoloFovX = sqrt(stdevHoloFovX);
+    content += L"STDEV HOLO FOV X: " + std::to_wstring(stdevHoloFovX) + L"\n";
+
+    double meanHoloFovY = std::accumulate(results.begin(), results.end(), 0.0,
+        [count](double value1, CALIBRATION_RESULTS value2)
+    {
+        return value1 + (value2.holoResults.fovY / count);
+    });
+    content += L"MEAN HOLO FOV Y: " + std::to_wstring(meanHoloFovY) + L"\n";
+
+    double stdevHoloFovY = std::accumulate(results.begin(), results.end(), 0.0,
+        [meanHoloFovY, count](double value1, CALIBRATION_RESULTS value2)
+    {
+        double value = meanHoloFovY - value2.holoResults.fovY;
+        return value1 + ((value * value) / count);
+    });
+    stdevHoloFovY = sqrt(stdevHoloFovY);
+    content += L"STDEV HOLO FOV Y: " + std::to_wstring(stdevHoloFovY) + L"\n";
+}
+
+void CalibrationApp::PrintMat(const cv::Mat& mat, std::wstring& content)
+{
+    for (int m = 0; m < mat.rows; m++)
+    {
+        for (int n = 0; n < mat.cols; n++)
+        {
+            content += std::to_wstring(mat.at<double>(m, n)) + L" ";
+        }
+    }
+}
+
+void CalibrationApp::SqrtMat(cv::Mat& mat)
+{
+    for (int m = 0; m < mat.rows; m++)
+    {
+        for (int n = 0; n < mat.cols; n++)
+        {
+            mat.at<double>(m, n) = sqrt(mat.at<double>(m, n));
+        }
+    }
 }
 
 void CalibrationApp::PerformCalibrationUsingTestData(int numImages, int numIterations, std::wstring directoryName)
@@ -849,10 +1993,20 @@ void CalibrationApp::PerformCalibrationUsingTestData(int numImages, int numItera
     std::wstring camTestPath = DirectoryHelper::FindUniqueFileName(testPath, L"cam", L".png", totalImages);
 
     CreateDirectoryW(directoryName.c_str(), NULL);
+
     std::vector<CALIBRATION_RESULTS> calibrationResults;
+    std::vector<CALIBRATION_RESULTS> calibWinrtResults;
+    std::vector<CALIBRATION_RESULTS> calibNoDistResults;
+    std::vector<CALIBRATION_RESULTS> calibWinrtOpencvResults;
+    std::vector<CALIBRATION_RESULTS> calibFixPrincResults;
+    std::vector<CALIBRATION_RESULTS> calibZeroTanResults;
+    std::vector<CALIBRATION_RESULTS> calibFixPrincZeroTanResults;
 
     for (int n = 0; n < numIterations; n++)
     {
+        std::wstring iterationPrompt = L"Iteration: " + std::to_wstring(n) + L"\n";
+        OutputString(iterationPrompt.c_str());
+
         // Clear any preexisting chess board data
         DeleteOutputFiles();
 
@@ -867,7 +2021,7 @@ void CalibrationApp::PerformCalibrationUsingTestData(int numImages, int numItera
             std::wstring pathRoot = testPath + std::to_wstring(index).c_str() + L"_";
             std::wstring camPath = pathRoot + L"cam.png";
             auto tempCameraMat = cv::imread(StringHelper::ws2s(camPath).c_str(), cv::IMREAD_UNCHANGED);
-            ProcessChessBoards(index, tempCameraMat, testPath);
+            ProcessChessBoards(index, tempCameraMat, testPath, false);
         }
 
         std::wstring overlayFile = directoryName + std::to_wstring(n) + L"_ChessBoardsUsed.png";
@@ -881,27 +2035,80 @@ void CalibrationApp::PerformCalibrationUsingTestData(int numImages, int numItera
         PerformCalibration(results, calibrationFile);
         calibrationResults.push_back(results);
 
-        /*PerformCalibrationHoloMatHoloDistortion(CALIBRATION_RESULTS& results, std::wstring fileName);
-        PerformCalibrationHoloMatNoDistortion(CALIBRATION_RESULTS& results, std::wstring fileName);
-        PerformCalibrationHoloMatOpenCV(CALIBRATION_RESULTS& results, std::wstring fileName);
-        PerformCalibrationHoloMatOpenCVFixPrincipal(CALIBRATION_RESULTS& results, std::wstring fileName);
-        PerformCalibrationHoloMatOpenCVZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);
-        PerformCalibrationHoloMatOpenCVFixPrincipalZeroTangent(CALIBRATION_RESULTS& results, std::wstring fileName);*/
+        calibrationFile = directoryName + std::to_wstring(n) + L"_CalibrationDataWinrt.txt";
+        CALIBRATION_RESULTS winrtResults;
+        PerformCalibrationHoloMatHoloDistortion(winrtResults, calibrationFile);
+        winrtResults.imageIndices = imageIndices;
+        calibWinrtResults.push_back(winrtResults);
+
+        calibrationFile = directoryName + std::to_wstring(n) + L"_CalibrationDataNoDist.txt";
+        CALIBRATION_RESULTS noDistResults;
+        PerformCalibrationHoloMatNoDistortion(noDistResults, calibrationFile);
+        noDistResults.imageIndices = imageIndices;
+        calibNoDistResults.push_back(noDistResults);
+
+        calibrationFile = directoryName + std::to_wstring(n) + L"_CalibrationDataWinrtOpencv.txt";
+        CALIBRATION_RESULTS winrtOpencvResults;
+        PerformCalibrationHoloMatOpenCV(winrtOpencvResults, calibrationFile);
+        winrtOpencvResults.imageIndices = imageIndices;
+        calibWinrtOpencvResults.push_back(winrtOpencvResults);
+
+        calibrationFile = directoryName + std::to_wstring(n) + L"_CalibrationDataFixPrinc.txt";
+        CALIBRATION_RESULTS fixPrincResults;
+        PerformCalibrationHoloMatOpenCVFixPrincipal(fixPrincResults, calibrationFile);
+        fixPrincResults.imageIndices = imageIndices;
+        calibFixPrincResults.push_back(fixPrincResults);
+
+        calibrationFile = directoryName + std::to_wstring(n) + L"_CalibrationDataZeroTan.txt";
+        CALIBRATION_RESULTS zeroTanResults;
+        PerformCalibrationHoloMatOpenCVZeroTangent(zeroTanResults, calibrationFile);
+        zeroTanResults.imageIndices = imageIndices;
+        calibZeroTanResults.push_back(zeroTanResults);
+
+        calibrationFile = directoryName + std::to_wstring(n) + L"_CalibrationDataFixPrincZeroTan.txt";
+        CALIBRATION_RESULTS fixPrincZeroTanResults;
+        PerformCalibrationHoloMatOpenCVFixPrincipalZeroTangent(fixPrincZeroTanResults, calibrationFile);
+        fixPrincZeroTanResults.imageIndices = imageIndices;
+        calibFixPrincZeroTanResults.push_back(fixPrincZeroTanResults);
     }
 
     std::wstring fileName = directoryName + L"Results.txt";
     DeleteFile(fileName.c_str());
     std::ofstream resultfs;
     resultfs.open(fileName.c_str());
-    for (auto result : calibrationResults)
-    {
-        resultfs << "STEREO RMS: " << result.stereoRMS << std::endl;
-        for (auto index : result.imageIndices)
-        {
-            resultfs << index << " ";
-        }
-        resultfs << std::endl;
-    }
+
+    std::wstring output = L"NUMBER OF IMAGES: " + std::to_wstring(numImages) + L"\n";
+    output += L"NUMBER OF ITERATIONS: " + std::to_wstring(numIterations) + L"\n\n";
+        
+    output += L"OPENCV RESULTS===================================================\n";
+    InterpretResults(calibrationResults, output);
+    output += L"\n";
+
+    output += L"WINRT RESULTS==================================================\n";
+    InterpretResults(calibWinrtResults, output);
+    output += L"\n";
+
+    output += L"WINRT NO DISTORTION RESULTS==================================================\n";
+    InterpretResults(calibNoDistResults, output);
+    output += L"\n";
+
+    output += L"WINRT OPENCV RESULTS==================================================\n";
+    InterpretResults(calibWinrtOpencvResults, output);
+    output += L"\n";
+
+    output += L"WINRT FIXED PRINCIPLE ==================================================\n";
+    InterpretResults(calibFixPrincResults, output);
+    output += L"\n";
+
+    output += L"WINRT ZERO TANGENT ==================================================\n";
+    InterpretResults(calibZeroTanResults, output);
+    output += L"\n";
+
+    output += L"WINRT FIXED PRINCIPLE & ZERO TANGENT ==================================================\n";
+    InterpretResults(calibFixPrincZeroTanResults, output);
+    output += L"\n";
+
+    resultfs << StringHelper::ws2s(output) << std::endl;
     resultfs.close();
 }
 
