@@ -201,7 +201,7 @@ void CalibrationApp::Update(DX::StepTimer const& timer)
     }
 
     // Take calibration pictures at a predetermined interval.
-    TakeCalibrationPictureAtInterval(timer);
+    // TakeCalibrationPictureAtInterval(timer);
 
     // Clear the calibration files that have been generated.
     if (keyState.X && !prevKeyState.X)
